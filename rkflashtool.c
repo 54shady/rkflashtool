@@ -115,6 +115,7 @@ static const struct t_pid {
     { 0x320a, "RK3288" },
     { 0x320b, "RK322X" }, // Both RK3228 and RK3229
     { 0x330a, "RK3368" },
+    { 0x330c, "RK3399" },
     { 0, "" },
 };
 
@@ -198,7 +199,7 @@ static void send_exec(uint32_t krnl_addr, uint32_t parm_addr) {
     if (parm_addr)  SETBE32(cmd+22, parm_addr);
                     SETBE32(cmd+12, RKFT_CMD_EXECUTESDRAM);
 
-    libusb_bulk_transfer(h, 2|LIBUSB_ENDPOINT_OUT, cmd, sizeof(cmd), &tmp, 0);
+    libusb_bulk_transfer(h, 1, cmd, sizeof(cmd), &tmp, 0);
 }
 
 static void send_reset(uint8_t flag) {
@@ -211,11 +212,12 @@ static void send_reset(uint8_t flag) {
     SETBE32(cmd+12, RKFT_CMD_RESETDEVICE);
     cmd[16] = flag;
 
-    libusb_bulk_transfer(h, 2|LIBUSB_ENDPOINT_OUT, cmd, sizeof(cmd), &tmp, 0);
+    libusb_bulk_transfer(h, 1, cmd, sizeof(cmd), &tmp, 0);
 }
 
 static void send_cmd(uint32_t command, uint32_t offset, uint16_t nsectors) {
     long int r = random();
+	int i;
 
     memset(cmd, 0 , 31);
     memcpy(cmd, "USBC", 4);
@@ -225,19 +227,19 @@ static void send_cmd(uint32_t command, uint32_t offset, uint16_t nsectors) {
     if (nsectors)   SETBE16(cmd+22, nsectors);
     if (command)    SETBE32(cmd+12, command);
 
-    libusb_bulk_transfer(h, 2|LIBUSB_ENDPOINT_OUT, cmd, sizeof(cmd), &tmp, 0);
+    libusb_bulk_transfer(h, 1, cmd, sizeof(cmd), &tmp, 0);
 }
 
 static void send_buf(unsigned int s) {
-    libusb_bulk_transfer(h, 2|LIBUSB_ENDPOINT_OUT, buf, s, &tmp, 0);
+    libusb_bulk_transfer(h, 1, buf, s, &tmp, 0);
 }
 
 static void recv_res(void) {
-    libusb_bulk_transfer(h, 1|LIBUSB_ENDPOINT_IN, res, sizeof(res), &tmp, 0);
+    libusb_bulk_transfer(h, 0x81, res, sizeof(res), &tmp, 0);
 }
 
 static void recv_buf(unsigned int s) {
-    libusb_bulk_transfer(h, 1|LIBUSB_ENDPOINT_IN, buf, s, &tmp, 0);
+    libusb_bulk_transfer(h, 0x81, buf, s, &tmp, 0);
 }
 
 #define NEXT do { argc--;argv++; } while(0)
@@ -634,7 +636,7 @@ action:
             }
 
             send_cmd(RKFT_CMD_WRITESECTOR, offset, 1);
-            libusb_bulk_transfer(h, 2|LIBUSB_ENDPOINT_OUT, ibuf, RKFT_IDB_BLOCKSIZE, &tmp, 0);
+            libusb_bulk_transfer(h, 0x1, ibuf, RKFT_IDB_BLOCKSIZE, &tmp, 0);
             recv_res();
             offset += 1;
             size -= 1;
