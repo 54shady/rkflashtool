@@ -179,8 +179,6 @@ static void usage(void) {
           "\trkflashtool w partname <infile  \twrite flash partition\n"
           "\trkflashtool r offset nsectors >outfile \tread flash\n"
           "\trkflashtool w offset nsectors <infile  \twrite flash\n"
-//          "\trkflashtool f                 >outfile \tread fuses\n"
-//          "\trkflashtool g                 <infile  \twrite fuses\n"
           "\trkflashtool p >file             \tfetch parameters\n"
           "\trkflashtool P <file             \twrite parameters\n"
           "\trkflashtool e partname          \terase flash (fill with 0xff)\n"
@@ -215,18 +213,33 @@ static void send_reset(uint8_t flag) {
     libusb_bulk_transfer(h, 1, cmd, sizeof(cmd), &tmp, 0);
 }
 
-static void send_cmd(uint32_t command, uint32_t offset, uint16_t nsectors) {
+/* 发送命令, 对端根据接收到的command, offset, nsectors进行读写操作 */
+static void send_cmd(uint32_t command, uint32_t offset, uint16_t nsectors)
+{
     long int r = random();
 	int i;
 
+	/* 初始化全局cmd变量 */
     memset(cmd, 0 , 31);
     memcpy(cmd, "USBC", 4);
 
-    if (r)          SETBE32(cmd+4, r);
-    if (offset)     SETBE32(cmd+17, offset);
-    if (nsectors)   SETBE16(cmd+22, nsectors);
-    if (command)    SETBE32(cmd+12, command);
+	/* 任意填充cmd[4]- cmd[7] */
+    if (r)
+		SETBE32(cmd+4, r);
 
+	/* offset : cmd[17] - cmd[20] */
+    if (offset)
+		SETBE32(cmd+17, offset);
+
+	/* nsectors : cmd[22] - cmd[23] */
+    if (nsectors)
+		SETBE16(cmd+22, nsectors);
+
+	/* command : cmd[12] - cmd[15] */
+    if (command)
+		SETBE32(cmd+12, command);
+
+	/* 通过usb传输将cmc发送到对断 */
     libusb_bulk_transfer(h, 1, cmd, sizeof(cmd), &tmp, 0);
 }
 
@@ -234,7 +247,9 @@ static void send_buf(unsigned int s) {
     libusb_bulk_transfer(h, 1, buf, s, &tmp, 0);
 }
 
-static void recv_res(void) {
+/* 接收USB返回的结果 */
+static void recv_res(void)
+{
     libusb_bulk_transfer(h, 0x81, res, sizeof(res), &tmp, 0);
 }
 
@@ -242,9 +257,10 @@ static void recv_buf(unsigned int s) {
     libusb_bulk_transfer(h, 0x81, buf, s, &tmp, 0);
 }
 
-#define NEXT do { argc--;argv++; } while(0)
+#define FOCUS_ON_NEXT_ARGV do { argc--;argv++; } while(0)
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     struct libusb_device_descriptor desc;
     const struct t_pid *ppid = pidtab;
     ssize_t nr;
@@ -254,16 +270,21 @@ int main(int argc, char **argv) {
     char action;
     char *partname = NULL;
 
-    info("rkflashtool v%d.%d\n", RKFLASHTOOL_VERSION_MAJOR,
-                                 RKFLASHTOOL_VERSION_MINOR);
+    info("rkflashtool v%d.%d\n", RKFLASHTOOL_VERSION_MAJOR, RKFLASHTOOL_VERSION_MINOR);
 
-    NEXT; if (!argc) usage();
+    FOCUS_ON_NEXT_ARGV;
 
-    action = **argv; NEXT;
+	if (!argc)
+		usage();
+
+    action = **argv;
+
+	FOCUS_ON_NEXT_ARGV;
 
     switch(action) {
     case 'b':
-        if (argc > 1) usage();
+        if (argc > 1)
+			usage();
         else if (argc == 1)
             flag = strtoul(argv[0], NULL, 0);
         break;
@@ -274,7 +295,8 @@ int main(int argc, char **argv) {
     case 'e':
     case 'r':
     case 'w':
-        if (argc < 1 || argc > 2) usage();
+        if (argc < 1 || argc > 2)
+			usage();
         if (argc == 1) {
             partname = argv[0];
         } else {
@@ -287,7 +309,8 @@ int main(int argc, char **argv) {
     case 'B':
     case 'i':
     case 'j':
-        if (argc != 2) usage();
+        if (argc != 2)
+			usage();
         offset = strtoul(argv[0], NULL, 0);
         size   = strtoul(argv[1], NULL, 0);
         break;
@@ -295,7 +318,8 @@ int main(int argc, char **argv) {
     case 'v':
     case 'p':
     case 'P':
-        if (argc) usage();
+        if (argc)
+			usage();
         offset = 0;
         size   = 1024;
         break;
@@ -304,13 +328,12 @@ int main(int argc, char **argv) {
     }
 
     /* Initialize libusb */
-
-    if (libusb_init(&c)) fatal("cannot init libusb\n");
+    if (libusb_init(&c))
+		fatal("cannot init libusb\n");
 
     libusb_set_debug(c, 3);
 
     /* Detect connected RockChip device */
-
     while ( !h && ppid->pid) {
         h = libusb_open_device_with_vid_pid(c, 0x2207, ppid->pid);
         if (h) {
@@ -319,23 +342,26 @@ int main(int argc, char **argv) {
         }
         ppid++;
     }
-    if (!h) fatal("cannot open device\n");
+    if (!h)
+		fatal("cannot open device\n");
 
     /* Connect to device */
-
     if (libusb_kernel_driver_active(h, 0) == 1) {
         info("kernel driver active\n");
         if (!libusb_detach_kernel_driver(h, 0))
             info("driver detached\n");
     }
 
+	/* claim interface */
     if (libusb_claim_interface(h, 0) < 0)
         fatal("cannot claim interface\n");
     info("interface claimed\n");
 
+	/* get device descriptor */
     if (libusb_get_device_descriptor(libusb_get_device(h), &desc) != 0)
         fatal("cannot get device descriptor\n");
 
+	/* oops, in mask rom mode */
     if (desc.bcdUSB == 0x200)
         info("MASK ROM MODE\n");
 
@@ -371,36 +397,44 @@ int main(int argc, char **argv) {
     }
 
     /* Initialize bootloader interface */
-
     send_cmd(RKFT_CMD_TESTUNITREADY, 0, 0);
     recv_res();
     usleep(20*1000);
 
-    /* Parse partition name */
-    if (partname) {
+    /*
+	 * 如果是读,写,擦除命令
+	 * 命令行中必定会带有分区名
+	 */
+    if (partname)
+	{
         info("working with partition: %s\n", partname);
 
-        /* Read parameters */
+        /*
+		 * 发送读LBA命令后得到返回结果,存在全局的buf变量中
+		 * 读lda + offset
+		 * 当offset = 0时读的是gpt信息
+		 */
         offset = 0;
         send_cmd(RKFT_CMD_READLBA, offset, RKFT_OFF_INCR);
         recv_buf(RKFT_BLOCKSIZE);
         recv_res();
 
-        /* Check parameter length */
+        /* 检查返回的数据长度,超过设定范围报异常 */
         uint32_t *p = (uint32_t*)buf+1;
         size = *p;
         if (size < 0 || size > MAX_PARAM_LENGTH)
-          fatal("Bad parameter length!\n");
+          fatal("Bad data length!\n");
 
-        /* Search for mtdparts */
+        /* 从返回的数据中读出分区信息内容 */
         const char *param = (const char *)&buf[8];
         const char *mtdparts = strstr(param, "mtdparts=");
         if (!mtdparts) {
             info("Error: 'mtdparts' not found in command line.\n");
             goto exit;
         }
+		info("%s\n", mtdparts);
 
-        /* Search for '(partition_name)' */
+        /* 在分区表中找到和命令行传入的分区一致的分区 */
         char partexp[256];
         snprintf(partexp, 256, "(%s)", partname);
         char *par = strstr(mtdparts, partexp);
@@ -409,6 +443,7 @@ int main(int argc, char **argv) {
             goto exit;
         }
 
+		info("%s\n", par);
         /* Cut string by NULL-ing just before (partition_name) */
         par[0] = '\0';
 
@@ -428,7 +463,6 @@ int main(int argc, char **argv) {
         /* Search for '-' sign (if last partition) */
         char *minus = strrchr(mtdparts, '-');
         if (minus) {
-
             /* Read size from NAND info */
             send_cmd(RKFT_CMD_READFLASHINFO, 0, 0);
             recv_buf(512);
@@ -464,7 +498,6 @@ int main(int argc, char **argv) {
 
 action:
     /* Check and execute command */
-
     switch(action) {
     case 'b':   /* Reboot device */
         info("rebooting device...\n");
@@ -473,12 +506,18 @@ action:
         break;
     case 'r':   /* Read FLASH */
         while (size > 0) {
-            infocr("reading flash memory at offset 0x%08x", offset);
+            infocr("reading mmc at offset 0x%08x", offset);
 
+			/* 读lba + offset, 每次传输RKFT_OFF_INCR */
             send_cmd(RKFT_CMD_READLBA, offset, RKFT_OFF_INCR);
             recv_buf(RKFT_BLOCKSIZE);
             recv_res();
 
+			/*
+			 * 将读到的内容写道标准输出里
+			 * 如果在命令行中将标准输出重定向到文件的话
+			 * 就相当与将读到的内容写入文件
+			 */
             if (write(1, buf, RKFT_BLOCKSIZE) <= 0)
                 fatal("Write error! Disk full?\n");
 
@@ -491,12 +530,18 @@ action:
         while (size > 0) {
             infocr("writing flash memory at offset 0x%08x", offset);
 
+			/*
+			 * 从标注输入读出内容
+			 * 如果在命令行中将标准输入重定向为文件的话
+			 * 即相当于将文件内容作为要传输的数据
+			 */
             if (read(0, buf, RKFT_BLOCKSIZE) <= 0) {
                 fprintf(stderr, "... Done!\n");
                 info("premature end-of-file reached.\n");
                 goto exit;
             }
 
+			/* 写lba + offset, 每次传输RKFT_OFF_INCR */
             send_cmd(RKFT_CMD_WRITELBA, offset, RKFT_OFF_INCR);
             send_buf(RKFT_BLOCKSIZE);
             recv_res();
