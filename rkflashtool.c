@@ -44,6 +44,9 @@ int _CRT_fmode = _O_BINARY;
 #include "rkcrc.h"
 #include "rkflashtool.h"
 
+#define EP1_READ 0x81
+#define EP1_WRITE 0x1
+
 #define RKFT_BLOCKSIZE      0x4000      /* must be multiple of 512 */
 #define RKFT_IDB_DATASIZE   0x200
 #define RKFT_IDB_BLOCKSIZE  0x210
@@ -53,6 +56,14 @@ int _CRT_fmode = _O_BINARY;
 #define MAX_PARAM_LENGTH    (128*512-12) /* cf. MAX_LOADER_PARAM in rkloader */
 #define SDRAM_BASE_ADDRESS  0x60000000
 
+/*
+ * RKFT_CMD_XXXX format
+ * 0xAABBCCDD
+ * 0xAA 表示Flags
+ * 0xBB 表示Lun
+ * 0xCC 表示Length
+ * 0xDD 表示CDB[0]
+ */
 #define RKFT_CMD_TESTUNITREADY      0x80000600
 #define RKFT_CMD_READFLASHID        0x80000601
 #define RKFT_CMD_READFLASHINFO      0x8000061a
@@ -142,14 +153,36 @@ static const char* const manufacturer[] = {   /* NAND Manufacturers */
 };
 #define MAX_NAND_ID (sizeof manufacturer / sizeof(char *))
 
-static uint8_t cmd[31], res[13], buf[RKFT_BLOCKSIZE];
+#if 0
+/* Command Block Wrapper */
+struct fsg_bulk_cb_wrap {
+	__le32	Signature;		/* Contains 'USBC' */
+	u32	Tag;			/* Unique per command id */
+	__le32	DataTransferLength;	/* Size of the data */
+	u8	Flags;			/* Direction in bit 7 */
+	u8	Lun;			/* LUN (normally 0) */
+	u8	Length;			/* Of the CDB, <= MAX_COMMAND_SIZE */
+	u8	CDB[16];		/* Command Data Block */
+};
+
+/* Command Status Wrapper */
+struct bulk_cs_wrap {
+	__le32	Signature;		/* Should = 'USBS' */
+	u32	Tag;			/* Same as original command */
+	__le32	Residue;		/* Amount not transferred */
+	u8	Status;			/* See below */
+};
+#endif
+
+#define USB_BULK_CB_WRAP_LEN	31
+#define USB_BULK_CS_WRAP_LEN	13
+
+static uint8_t cbw[USB_BULK_CB_WRAP_LEN], csw[USB_BULK_CS_WRAP_LEN], buf[RKFT_BLOCKSIZE];
 static uint8_t ibuf[RKFT_IDB_BLOCKSIZE];
 static libusb_context *c;
 static libusb_device_handle *h = NULL;
 static int tmp;
-
 static const char *const strings[2] = { "info", "fatal" };
-
 static void info_and_fatal(const int s, const int cr, char *f, ...) {
     va_list ap;
     va_start(ap,f);
@@ -189,36 +222,23 @@ static void usage(void) {
 static void send_exec(uint32_t krnl_addr, uint32_t parm_addr) {
     long int r = random();
 
-    memset(cmd, 0 , 31);
-    memcpy(cmd, "USBC", 4);
+    memset(cbw, 0 , 31);
+    memcpy(cbw, "USBC", 4);
 
-    if (r)          SETBE32(cmd+4, r);
-    if (krnl_addr)  SETBE32(cmd+17, krnl_addr);
-    if (parm_addr)  SETBE32(cmd+22, parm_addr);
-                    SETBE32(cmd+12, RKFT_CMD_EXECUTESDRAM);
+    if (r)          SETBE32(cbw+4, r);
+    if (krnl_addr)  SETBE32(cbw+17, krnl_addr);
+    if (parm_addr)  SETBE32(cbw+22, parm_addr);
+                    SETBE32(cbw+12, RKFT_CMD_EXECUTESDRAM);
 
-    libusb_bulk_transfer(h, 1, cmd, sizeof(cmd), &tmp, 0);
-}
-
-static void send_reset(uint8_t flag) {
-    long int r = random();
-
-    memset(cmd, 0 , 31);
-    memcpy(cmd, "USBC", 4);
-
-    SETBE32(cmd+4, r);
-    SETBE32(cmd+12, RKFT_CMD_RESETDEVICE);
-    cmd[16] = flag;
-
-    libusb_bulk_transfer(h, 1, cmd, sizeof(cmd), &tmp, 0);
+    libusb_bulk_transfer(h, EP1_WRITE, cbw, sizeof(cbw), &tmp, 0);
 }
 
 #if 0
-cmd对应cbw数据结构如下
+usb协议中cbw格式如下
 Signature 地址等于结构体首地址
 Tag 地址等于结构体首地址 + 4
-Flags 地址等于结构体首地址 + 12 ==> cmd[12]
-CDB 地址等于结构体首地址 + 15 ==> cmd[15]
+Flags 地址等于结构体首地址 + 12 ==> cbw[12]
+CDB 地址等于结构体首地址 + 15 ==> cbw[15]
 
 struct fsg_bulk_cb_wrap {
 	__le32	Signature;		/* Contains 'USBC' */
@@ -232,52 +252,56 @@ struct fsg_bulk_cb_wrap {
 #endif
 
 /* 发送命令, 对端根据接收到的command, offset, nsectors进行读写操作 */
-static void send_cmd(uint32_t command, uint32_t offset, uint16_t nsectors)
+static void send_cbw(uint32_t command, uint32_t offset, uint16_t nsectors, uint8_t flag)
 {
     long int r = random();
-	int i;
 
-	/* 初始化全局cmd变量 <==> Signature */
-    memset(cmd, 0 , 31);
-    memcpy(cmd, "USBC", 4);
+	/* 初始化全局cbw变量 <==> Signature */
+    memset(cbw, 0 , 31);
+    memcpy(cbw, "USBC", 4);
 
-	/* 任意填充cmd[4]- cmd[7] <==> Tag */
+	/* 任意填充cbw[4]- cbw[7] <==> Tag */
     if (r)
-		SETBE32(cmd+4, r);
+		SETBE32(cbw+4, r);
 
-	/* offset : cmd[17] - cmd[20] */
+	/* offset : cbw[17] - cbw[20] */
     if (offset)
-		SETBE32(cmd+17, offset);
+		SETBE32(cbw+17, offset);
 
-	/* nsectors : cmd[22] - cmd[23] */
+	/* nsectors : cbw[22] - cbw[23] */
     if (nsectors)
-		SETBE16(cmd+22, nsectors);
+		SETBE16(cbw+22, nsectors);
 
-	/* command : cmd[12] - cmd[15] <==> Flags, Lun, Length, CDB[0] */
+	/* command : cbw[12] - cbw[15] <==> Flags, Lun, Length, CDB[0] */
     if (command)
-		SETBE32(cmd+12, command);
+		SETBE32(cbw+12, command);
 
-	/* dump cmd */
-	printf("\nDidrection = 0x%x\n", cmd[12]);
-	printf("Length = 0x%x\n", cmd[14]);
-	printf("CDB[0] = 0x%x\n", cmd[15]);
+	/* set flag for reboot mode */
+	if (flag)
+		cbw[16] = flag;
 
-	/* 通过usb传输将cmd发送到对端 */
-    libusb_bulk_transfer(h, 1, cmd, sizeof(cmd), &tmp, 0);
+	/* dump cbw */
+	printf("\nDidrection = 0x%x\n", cbw[12]);
+	printf("Length = 0x%x\n", cbw[14]);
+	printf("CDB[0] = 0x%x\n", cbw[15]);
+	printf("CDB[1] = 0x%x\n", cbw[16]);
+
+	/* 通过usb传输将cbw发送到对端 */
+    libusb_bulk_transfer(h, EP1_WRITE, cbw, sizeof(cbw), &tmp, 0);
 }
 
 static void send_buf(unsigned int s) {
-    libusb_bulk_transfer(h, 1, buf, s, &tmp, 0);
+    libusb_bulk_transfer(h, EP1_WRITE, buf, s, &tmp, 0);
 }
 
 /* 接收USB返回的结果 */
-static void recv_res(void)
+static void recv_csw(void)
 {
-    libusb_bulk_transfer(h, 0x81, res, sizeof(res), &tmp, 0);
+    libusb_bulk_transfer(h, EP1_READ, csw, sizeof(csw), &tmp, 0);
 }
 
 static void recv_buf(unsigned int s) {
-    libusb_bulk_transfer(h, 0x81, buf, s, &tmp, 0);
+    libusb_bulk_transfer(h, EP1_READ, buf, s, &tmp, 0);
 }
 
 #define FOCUS_ON_NEXT_ARGV do { argc--;argv++; } while(0)
@@ -420,8 +444,8 @@ int main(int argc, char **argv)
     }
 
     /* Initialize bootloader interface */
-    send_cmd(RKFT_CMD_TESTUNITREADY, 0, 0);
-    recv_res();
+    send_cbw(RKFT_CMD_TESTUNITREADY, 0, 0, flag);
+    recv_csw();
     usleep(20*1000);
 
     /*
@@ -438,9 +462,9 @@ int main(int argc, char **argv)
 		 * 当offset = 0时读的是gpt信息
 		 */
         offset = 0;
-        send_cmd(RKFT_CMD_READLBA, offset, RKFT_OFF_INCR);
+        send_cbw(RKFT_CMD_READLBA, offset, RKFT_OFF_INCR, flag);
         recv_buf(RKFT_BLOCKSIZE);
-        recv_res();
+        recv_csw();
 
         /* 检查返回的数据长度,超过设定范围报异常 */
         uint32_t *p = (uint32_t*)buf+1;
@@ -487,9 +511,9 @@ int main(int argc, char **argv)
         char *minus = strrchr(mtdparts, '-');
         if (minus) {
             /* Read size from NAND info */
-            send_cmd(RKFT_CMD_READFLASHINFO, 0, 0);
+            send_cbw(RKFT_CMD_READFLASHINFO, 0, 0, flag);
             recv_buf(512);
-            recv_res();
+            recv_csw();
 
             nand_info *nand = (nand_info *) buf;
             size = nand->flash_size - offset;
@@ -524,17 +548,17 @@ action:
     switch(action) {
     case 'b':   /* Reboot device */
         info("rebooting device...\n");
-        send_reset(flag);
-        recv_res();
+        send_cbw(RKFT_CMD_RESETDEVICE, 0, 0, flag);
+        recv_csw();
         break;
     case 'r':   /* Read FLASH */
         while (size > 0) {
             infocr("reading mmc at offset 0x%08x", offset);
 
 			/* 读lba + offset, 每次传输RKFT_OFF_INCR */
-            send_cmd(RKFT_CMD_READLBA, offset, RKFT_OFF_INCR);
+            send_cbw(RKFT_CMD_READLBA, offset, RKFT_OFF_INCR, flag);
             recv_buf(RKFT_BLOCKSIZE);
-            recv_res();
+            recv_csw();
 
 			/*
 			 * 将读到的内容写道标准输出里
@@ -565,9 +589,9 @@ action:
             }
 
 			/* 写lba + offset, 每次传输RKFT_OFF_INCR */
-            send_cmd(RKFT_CMD_WRITELBA, offset, RKFT_OFF_INCR);
+            send_cbw(RKFT_CMD_WRITELBA, offset, RKFT_OFF_INCR, flag);
             send_buf(RKFT_BLOCKSIZE);
-            recv_res();
+            recv_csw();
 
             offset += RKFT_OFF_INCR;
             size   -= RKFT_OFF_INCR;
@@ -580,9 +604,9 @@ action:
 
             info("reading parameters at offset 0x%08x\n", offset);
 
-            send_cmd(RKFT_CMD_READLBA, offset, RKFT_OFF_INCR);
+            send_cbw(RKFT_CMD_READLBA, offset, RKFT_OFF_INCR, flag);
             recv_buf(RKFT_BLOCKSIZE);
-            recv_res();
+            recv_csw();
 
             /* Check size */
             size = *p;
@@ -628,9 +652,9 @@ action:
 
             for(offset = 0; offset < 0x2000; offset += 0x400) {
                 infocr("writing flash memory at offset 0x%08x", offset);
-                send_cmd(RKFT_CMD_WRITELBA, offset, RKFT_OFF_INCR);
+                send_cbw(RKFT_CMD_WRITELBA, offset, RKFT_OFF_INCR, flag);
                 send_buf(RKFT_BLOCKSIZE);
-                recv_res();
+                recv_csw();
             }
         }
         fprintf(stderr, "... Done!\n");
@@ -640,9 +664,9 @@ action:
             int sizeRead = size > RKFT_BLOCKSIZE ? RKFT_BLOCKSIZE : size;
             infocr("reading memory at offset 0x%08x size %x", offset, sizeRead);
 
-            send_cmd(RKFT_CMD_READSDRAM, offset - SDRAM_BASE_ADDRESS, sizeRead);
+            send_cbw(RKFT_CMD_READSDRAM, offset - SDRAM_BASE_ADDRESS, sizeRead, flag);
             recv_buf(sizeRead);
-            recv_res();
+            recv_csw();
 
             if (write(1, buf, sizeRead) <= 0)
                 fatal("Write error! Disk full?\n");
@@ -661,9 +685,9 @@ action:
             }
             infocr("writing memory at offset 0x%08x size %x", offset, sizeRead);
 
-            send_cmd(RKFT_CMD_WRITESDRAM, offset - SDRAM_BASE_ADDRESS, sizeRead);
+            send_cbw(RKFT_CMD_WRITESDRAM, offset - SDRAM_BASE_ADDRESS, sizeRead, flag);
             send_buf(sizeRead);
-            recv_res();
+            recv_csw();
 
             offset += sizeRead;
             size -= sizeRead;
@@ -673,16 +697,16 @@ action:
     case 'B':   /* Exec RAM */
         info("booting kernel...\n");
         send_exec(offset - SDRAM_BASE_ADDRESS, size - SDRAM_BASE_ADDRESS);
-        recv_res();
+        recv_csw();
         break;
     case 'i':   /* Read IDB */
         while (size > 0) {
             int sizeRead = size > RKFT_IDB_INCR ? RKFT_IDB_INCR : size;
             infocr("reading IDB flash memory at offset 0x%08x", offset);
 
-            send_cmd(RKFT_CMD_READSECTOR, offset, sizeRead);
+            send_cbw(RKFT_CMD_READSECTOR, offset, sizeRead, flag);
             recv_buf(RKFT_IDB_BLOCKSIZE * sizeRead);
-            recv_res();
+            recv_csw();
 
             if (write(1, buf, RKFT_IDB_BLOCKSIZE * sizeRead) <= 0)
                 fatal("Write error! Disk full?\n");
@@ -703,9 +727,9 @@ action:
                 goto exit;
             }
 
-            send_cmd(RKFT_CMD_WRITESECTOR, offset, 1);
-            libusb_bulk_transfer(h, 0x1, ibuf, RKFT_IDB_BLOCKSIZE, &tmp, 0);
-            recv_res();
+            send_cbw(RKFT_CMD_WRITESECTOR, offset, 1, flag);
+            libusb_bulk_transfer(h, EP1_WRITE, ibuf, RKFT_IDB_BLOCKSIZE, &tmp, 0);
+            recv_csw();
             offset += 1;
             size -= 1;
         }
@@ -716,9 +740,9 @@ action:
         while (size > 0) {
             infocr("erasing flash memory at offset 0x%08x", offset);
 
-            send_cmd(RKFT_CMD_WRITELBA, offset, RKFT_OFF_INCR);
+            send_cbw(RKFT_CMD_WRITELBA, offset, RKFT_OFF_INCR, flag);
             send_buf(RKFT_BLOCKSIZE);
-            recv_res();
+            recv_csw();
 
             offset += RKFT_OFF_INCR;
             size   -= RKFT_OFF_INCR;
@@ -726,9 +750,9 @@ action:
         fprintf(stderr, "... Done!\n");
         break;
     case 'v':   /* Read Chip Version */
-        send_cmd(RKFT_CMD_READCHIPINFO, 0, 0);
+        send_cbw(RKFT_CMD_READCHIPINFO, 0, 0, flag);
         recv_buf(16);
-        recv_res();
+        recv_csw();
 
         info("chip version: %c%c%c%c-%c%c%c%c.%c%c.%c%c-%c%c%c%c\n",
             buf[ 3], buf[ 2], buf[ 1], buf[ 0],
@@ -738,16 +762,16 @@ action:
         break;
     case 'n':   /* Read NAND Flash Info */
     {
-        send_cmd(RKFT_CMD_READFLASHID, 0, 0);
+        send_cbw(RKFT_CMD_READFLASHID, 0, 0, flag);
         recv_buf(5);
-        recv_res();
+        recv_csw();
 
         info("Flash ID: %02x %02x %02x %02x %02x\n",
             buf[0], buf[1], buf[2], buf[3], buf[4]);
 
-        send_cmd(RKFT_CMD_READFLASHINFO, 0, 0);
+        send_cbw(RKFT_CMD_READFLASHINFO, 0, 0, flag);
         recv_buf(512);
-        recv_res();
+        recv_csw();
 
         nand_info *nand = (nand_info *) buf;
         uint8_t id = nand->manufacturer_id,
