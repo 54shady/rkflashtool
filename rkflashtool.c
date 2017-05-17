@@ -213,17 +213,35 @@ static void send_reset(uint8_t flag) {
     libusb_bulk_transfer(h, 1, cmd, sizeof(cmd), &tmp, 0);
 }
 
+#if 0
+cmd对应cbw数据结构如下
+Signature 地址等于结构体首地址
+Tag 地址等于结构体首地址 + 4
+Flags 地址等于结构体首地址 + 12 ==> cmd[12]
+CDB 地址等于结构体首地址 + 15 ==> cmd[15]
+
+struct fsg_bulk_cb_wrap {
+	__le32	Signature;		/* Contains 'USBC' */
+	u32	Tag;			/* Unique per command id */
+	__le32	DataTransferLength;	/* Size of the data */
+	u8	Flags;			/* Direction in bit 7 */
+	u8	Lun;			/* LUN (normally 0) */
+	u8	Length;			/* Of the CDB, <= MAX_COMMAND_SIZE */
+	u8	CDB[16];		/* Command Data Block */
+};
+#endif
+
 /* 发送命令, 对端根据接收到的command, offset, nsectors进行读写操作 */
 static void send_cmd(uint32_t command, uint32_t offset, uint16_t nsectors)
 {
     long int r = random();
 	int i;
 
-	/* 初始化全局cmd变量 */
+	/* 初始化全局cmd变量 <==> Signature */
     memset(cmd, 0 , 31);
     memcpy(cmd, "USBC", 4);
 
-	/* 任意填充cmd[4]- cmd[7] */
+	/* 任意填充cmd[4]- cmd[7] <==> Tag */
     if (r)
 		SETBE32(cmd+4, r);
 
@@ -235,11 +253,16 @@ static void send_cmd(uint32_t command, uint32_t offset, uint16_t nsectors)
     if (nsectors)
 		SETBE16(cmd+22, nsectors);
 
-	/* command : cmd[12] - cmd[15] */
+	/* command : cmd[12] - cmd[15] <==> Flags, Lun, Length, CDB[0] */
     if (command)
 		SETBE32(cmd+12, command);
 
-	/* 通过usb传输将cmc发送到对断 */
+	/* dump cmd */
+	printf("\nDidrection = 0x%x\n", cmd[12]);
+	printf("Length = 0x%x\n", cmd[14]);
+	printf("CDB[0] = 0x%x\n", cmd[15]);
+
+	/* 通过usb传输将cmd发送到对端 */
     libusb_bulk_transfer(h, 1, cmd, sizeof(cmd), &tmp, 0);
 }
 
