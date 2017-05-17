@@ -418,7 +418,7 @@ int main(int argc, char **argv)
     case 'l':
         info("load DDR init\n");
         crc16 = 0xffff;
-        while ((nr = read(0, buf, 4096)) == 4096) {
+        while ((nr = read(STDIN_FILENO, buf, 4096)) == 4096) {
             crc16 = rkcrc16(crc16, buf, nr);
             libusb_control_transfer(h, LIBUSB_REQUEST_TYPE_VENDOR, 12, 0, 1137, buf, nr, 0);
         }
@@ -432,7 +432,7 @@ int main(int argc, char **argv)
     case 'L':
         info("load USB loader\n");
         crc16 = 0xffff;
-        while ((nr = read(0, buf, 4096)) == 4096) {
+        while ((nr = read(STDIN_FILENO, buf, 4096)) == 4096) {
             crc16 = rkcrc16(crc16, buf, nr);
             libusb_control_transfer(h, LIBUSB_REQUEST_TYPE_VENDOR, 12, 0, 1138, buf, nr, 0);
         }
@@ -567,7 +567,7 @@ action:
 			 * 如果在命令行中将标准输出重定向到文件的话
 			 * 就相当与将读到的内容写入文件
 			 */
-            if (write(1, buf, RKFT_BLOCKSIZE) <= 0)
+            if (write(STDOUT_FILENO, buf, RKFT_BLOCKSIZE) <= 0)
                 fatal("Write error! Disk full?\n");
 
             offset += RKFT_OFF_INCR;
@@ -584,7 +584,7 @@ action:
 			 * 如果在命令行中将标准输入重定向为文件的话
 			 * 即相当于将文件内容作为要传输的数据
 			 */
-            if (read(0, buf, RKFT_BLOCKSIZE) <= 0) {
+            if (read(STDIN_FILENO, buf, RKFT_BLOCKSIZE) <= 0) {
                 fprintf(stderr, "... Done!\n");
                 info("premature end-of-file reached.\n");
                 goto exit;
@@ -623,7 +623,7 @@ action:
             if (crc_buf != crc)
               fatal("bad CRC! (%#x, should be %#x)\n", crc_buf, crc);
 
-            if (write(1, &buf[8], size) <= 0)
+			if (write(STDOUT_FILENO, &buf[8], size) <= 0)
                 fatal("Write error! Disk full?\n");
         }
         break;
@@ -634,7 +634,7 @@ action:
 
             /* Content */
             int sizeRead;
-            if ((sizeRead = read(0, buf + 8, RKFT_BLOCKSIZE - 8)) < 0) {
+            if ((sizeRead = read(STDIN_FILENO, buf + 8, RKFT_BLOCKSIZE - 8)) < 0) {
                 info("read error: %s\n", strerror(errno));
                 goto exit;
             }
@@ -670,7 +670,7 @@ action:
             recv_buf(sizeRead);
             recv_csw();
 
-            if (write(1, buf, sizeRead) <= 0)
+            if (write(STDOUT_FILENO, buf, sizeRead) <= 0)
                 fatal("Write error! Disk full?\n");
 
             offset += sizeRead;
@@ -681,7 +681,7 @@ action:
     case 'M':   /* Write RAM */
         while (size > 0) {
             int sizeRead;
-            if ((sizeRead = read(0, buf, RKFT_BLOCKSIZE)) <= 0) {
+            if ((sizeRead = read(STDIN_FILENO, buf, RKFT_BLOCKSIZE)) <= 0) {
                 info("premature end-of-file reached.\n");
                 goto exit;
             }
@@ -710,7 +710,7 @@ action:
             recv_buf(RKFT_IDB_BLOCKSIZE * sizeRead);
             recv_csw();
 
-            if (write(1, buf, RKFT_IDB_BLOCKSIZE * sizeRead) <= 0)
+            if (write(STDOUT_FILENO, buf, RKFT_IDB_BLOCKSIZE * sizeRead) <= 0)
                 fatal("Write error! Disk full?\n");
 
             offset += sizeRead;
@@ -723,7 +723,7 @@ action:
             infocr("writing IDB flash memory at offset 0x%08x", offset);
 
             memset(ibuf, RKFT_IDB_BLOCKSIZE, 0xff);
-            if (read(0, ibuf, RKFT_IDB_DATASIZE) <= 0) {
+            if (read(STDIN_FILENO, ibuf, RKFT_IDB_DATASIZE) <= 0) {
                 fprintf(stderr, "... Done!\n");
                 info("premature end-of-file reached.\n");
                 goto exit;
