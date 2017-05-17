@@ -290,8 +290,9 @@ static void send_cbw(uint32_t command, uint32_t offset, uint16_t nsectors, uint8
     libusb_bulk_transfer(h, EP1_WRITE, cbw, sizeof(cbw), &tmp, 0);
 }
 
-static void send_buf(unsigned int s) {
-    libusb_bulk_transfer(h, EP1_WRITE, buf, s, &tmp, 0);
+static void send_buf(int length)
+{
+    libusb_bulk_transfer(h, EP1_WRITE, buf, length, &tmp, 0);
 }
 
 /* 接收USB返回的结果 */
@@ -300,8 +301,9 @@ static void recv_csw(void)
     libusb_bulk_transfer(h, EP1_READ, csw, sizeof(csw), &tmp, 0);
 }
 
-static void recv_buf(unsigned int s) {
-    libusb_bulk_transfer(h, EP1_READ, buf, s, &tmp, 0);
+static void recv_buf(int length)
+{
+    libusb_bulk_transfer(h, EP1_READ, buf, length, &tmp, 0);
 }
 
 #define FOCUS_ON_NEXT_ARGV do { argc--;argv++; } while(0)
